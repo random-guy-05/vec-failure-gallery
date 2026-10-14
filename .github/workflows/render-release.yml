@@ -1,0 +1,96 @@
+name: render-release
+
+on:
+  push:
+    paths:
+      - "assets/svg/**"
+      - ".release/source.b64"
+      - ".github/workflows/render-release.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install render dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-dejavu-core
+          python -m pip install --upgrade pip
+          python -m pip install cairosvg pypdf
+
+      - name: Expand exact source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/vec-release
+          base64 --decode .release/source.b64 > /tmp/vec-release/source.tgz
+          tar -xzf /tmp/vec-release/source.tgz -C .
+
+      - name: Render SVG sources
+        env:
+          COMBINED_PDF: "VEC_FAILURE_MODE_GALLERY.pdf"
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import cairosvg
+          from pypdf import PdfReader, PdfWriter
+
+          root = Path(".")
+          sources = sorted((root / "assets" / "svg").glob("*.svg"))
+          if not sources:
+              raise SystemExit("no SVG sources found")
+
+          png_dir = root / "assets" / "png"
+          pdf_dir = root / "assets" / "pdf"
+          png_dir.mkdir(parents=True, exist_ok=True)
+          pdf_dir.mkdir(parents=True, exist_ok=True)
+
+          page_pdfs = []
+          for svg in sources:
+              png = png_dir / f"{svg.stem}.png"
+              pdf = pdf_dir / f"{svg.stem}.pdf"
+              cairosvg.svg2png(
+                  url=str(svg),
+                  write_to=str(png),
+                  scale=2,
+              )
+              cairosvg.svg2pdf(
+                  url=str(svg),
+                  write_to=str(pdf),
+              )
+              page_pdfs.append(pdf)
+
+          writer = PdfWriter()
+          for path in page_pdfs:
+              reader = PdfReader(str(path))
+              for page in reader.pages:
+                  writer.add_page(page)
+          with open(os.environ["COMBINED_PDF"], "wb") as handle:
+              writer.write(handle)
+          PY
+      - name: Verify generated assets
+        run: python scripts/verify_assets.py
+      - name: Finalize public release tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .release
+          rm -f .release-init
+          rm -f .github/workflows/render-release.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Render v1.0.0 visual assets"
+          git push origin HEAD:${GITHUB_REF_NAME}
